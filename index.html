@@ -1,10 +1,9 @@
-HTML
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>體感 Flappy Bird (MQTTGO 1秒延遲版)</title>
+    <title>體感 Flappy Bird (MQTTGO 1秒延遲+蓄力無敵版)</title>
     <style>
         html, body {
             margin: 0;
@@ -113,9 +112,9 @@ HTML
         let testSuccessTimer = 0;
         let audioCtx = null;
 
-        // 起立與無敵狀態變數
+        // 【優化】起立與無敵狀態新變數
         let baseHipKneeDist = 0.18;      
-        let wasStandingUp = false;       
+        let isSquatting = false; // 新增：用來記錄玩家目前是否處於蹲下/坐下蓄力狀態
         let invincibleEndTime = 0;       
         let cooldownEndTime = 0;         
 
@@ -165,7 +164,9 @@ HTML
                 invincibleEndTime = currentTime + 5000; 
                 cooldownEndTime = currentTime + 20000;  
                 playShieldSound();
+                return true;
             }
+            return false;
         }
 
         function triggerFlap() {
@@ -184,7 +185,7 @@ HTML
             score = 0;
             invincibleEndTime = 0;
             cooldownEndTime = 0;
-            wasStandingUp = false;
+            isSquatting = false;
             hasOpenedHands = false; 
             resetPipe();
             currentState = STATES.PLAYING;
@@ -254,13 +255,21 @@ HTML
                     if (distance < threshold) palmsCollided = true;
                 }
 
-                // 起立偵測
+                // 【重寫】起立與蹲下蓄力偵測邏輯
                 const leftHip = landmarks[23];
                 const leftKnee = landmarks[25];
                 if (leftHip.visibility > 0.5 && leftKnee.visibility > 0.5) {
                     const currentHipKneeDist = Math.abs(leftKnee.y - leftHip.y);
-                    if (currentHipKneeDist > baseHipKneeDist * 1.05) {
+                    
+                    // A. 如果目前大腿長度小於基準站姿的 82%，代表玩家「蹲下或坐下」了 -> 進入蓄力狀態
+                    if (currentHipKneeDist < baseHipKneeDist * 0.82) {
+                        isSquatting = true;
+                    }
+                    
+                    // B. 如果先前已經是蓄力狀態，且現在大腿長度恢復到 95% 以上 -> 代表玩家「猛然站直」了
+                    if (isSquatting && currentHipKneeDist > baseHipKneeDist * 0.95) {
                         isStandingNow = true;
+                        isSquatting = false; // 觸發後重置蓄力狀態
                     }
                 }
             }
@@ -282,16 +291,14 @@ HTML
                         if (hasOpenedHands) {
                             triggerFlap();
                             
-                            // --- 【更新】發送到指定的 MQTTGO.io 'PD' 主題 ---
                             if (mqttClient && mqttClient.connected) {
-                                mqttClient.publish('PD', '1'); // 立刻發送 "1"
+                                mqttClient.publish('PD', '1'); 
                                 
                                 setTimeout(() => {
-                                    mqttClient.publish('PD', '2'); // 【已修改】等待 1 秒 (1000 毫秒) 後發送 "2"
+                                    mqttClient.publish('PD', '2'); 
                                     console.log("MQTTGO 發送成功: 1 -> 2 到主題 [PD] (延遲 1 秒)");
                                 }, 1000); 
                             }
-                            // ------------------------------------------
 
                             hasOpenedHands = false; 
                         }
@@ -301,11 +308,10 @@ HTML
                     isPalmsTouching = false;
                 }
 
-                // 體感挺身起立無敵
-                if (isStandingNow && !wasStandingUp) {
+                // 體感挺身起立無敵（當滿足「先蹲後站」時觸發）
+                if (isStandingNow) {
                     triggerShield();
                 }
-                wasStandingUp = isStandingNow;
 
                 const isInvincible = currentTime < invincibleEndTime;
 
@@ -404,8 +410,14 @@ HTML
                         canvasCtx.fillStyle = '#ff9900';
                         canvasCtx.fillText(`⏳ 大絕招冷卻中 (CD): ${cdLeft} 秒`, 40, HEIGHT - 25);
                     } else {
-                        canvasCtx.fillStyle = '#00ff00';
-                        canvasCtx.fillText("⚡ 大絕: [挺身起立] 即可發動無敵！", 40, HEIGHT - 25);
+                        // 畫出大絕招蓄力狀態
+                        if (isSquatting) {
+                            canvasCtx.fillStyle = '#00ffff';
+                            canvasCtx.fillText("⚡ [已蹲下蓄力] 隨時可以站直發動無敵！", 40, HEIGHT - 25);
+                        } else {
+                            canvasCtx.fillStyle = '#00ff00';
+                            canvasCtx.fillText("🦵 大絕: [先蹲下再迅速站直] 即可發動無敵！", 40, HEIGHT - 25);
+                        }
                     }
                 }
             }
@@ -444,7 +456,7 @@ HTML
 
                 canvasCtx.fillStyle = 'white';
                 canvasCtx.font = '24px Arial';
-                canvasCtx.fillText("請退後至全身入鏡。先雙手張開超過耳朵，再相碰一次進行校正", WIDTH / 2, HEIGHT / 2);
+                canvasCtx.fillText("請退後至全身（必須拍到膝蓋）。先雙手張開超過耳朵，再相碰一次進行校正", WIDTH / 2, HEIGHT / 2);
 
                 if (palmsCollided) {
                     if (!isPalmsTouching) {
@@ -456,8 +468,10 @@ HTML
                             if (results.poseLandmarks) {
                                 const l = results.poseLandmarks;
                                 if (l[23] && l[25]) {
+                                    // 校正時請保持「正常站直」，程式會記錄你此時的大腿長度作為 100% 基準
                                     baseHipKneeDist = Math.abs(l[25].y - l[23].y);
                                     if(baseHipKneeDist < 0.05) baseHipKneeDist = 0.18; 
+                                    console.log("校正成功！基準站姿大腿垂直高度為:", baseHipKneeDist);
                                 }
                             }
                         }
