@@ -4,7 +4,7 @@ HTML
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>純體感 Flappy Bird (酷黑防護罩版)</title>
+    <title>純體感 Flappy Bird (大動作擊掌版)</title>
     <style>
         html, body {
             margin: 0;
@@ -107,6 +107,9 @@ HTML
         let invincibleEndTime = 0;       
         let cooldownEndTime = 0;         
 
+        // 新增：張開雙手超過耳朵的狀態鎖
+        let hasOpenedHands = false;
+
         const PIP = { x: 30, y: 30, width: 280, height: 157 }; 
         let currentStream = null; 
 
@@ -138,14 +141,12 @@ HTML
                 osc.type = 'sine'; 
                 osc.frequency.setValueAtTime(350, audioCtx.currentTime);
                 osc.frequency.linearRampToValueAtTime(850, audioCtx.currentTime + 0.3);
-                gain.gain.setValueAtTime(0.25, applicationCtx.currentTime);
                 gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
                 gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
                 osc.start(); osc.stop(audioCtx.currentTime + 0.3);
             } catch (e) {}
         }
 
-        // 大絕招啟動邏輯（20秒冷卻）
         function triggerShield() {
             const currentTime = performance.now();
             if (currentTime > cooldownEndTime) {
@@ -172,12 +173,12 @@ HTML
             invincibleEndTime = 0;
             cooldownEndTime = 0;
             wasStandingUp = false;
+            hasOpenedHands = false; // 重置雙手鎖
             resetPipe();
             currentState = STATES.PLAYING;
             if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
         }
 
-        // 僅保留 R 鍵用於重開遊戲，移除跳躍與大絕招的鍵盤控制
         window.addEventListener('keydown', (e) => {
             if (e.key.toLowerCase() === 'r' && currentState === STATES.GAMEOVER) {
                 resetGame();
@@ -216,9 +217,25 @@ HTML
             if (results.poseLandmarks) {
                 const landmarks = results.poseLandmarks;
                 
-                // 擊掌偵測
                 const leftPalm = landmarks[19];  
                 const rightPalm = landmarks[20]; 
+                const leftEar = landmarks[7];   // 左耳
+                const rightEar = landmarks[8];  // 右耳
+
+                // 核心邏輯：偵測雙手是否已經張開超過耳朵
+                // 注意：影像在水平方向通常是鏡像的，這裡我們用相對位置判定
+                if (leftPalm.visibility > 0.5 && rightPalm.visibility > 0.5 && leftEar.visibility > 0.5 && rightEar.visibility > 0.5) {
+                    // 影像中，通常左手在畫面右邊，右手在畫面左邊（若有鏡像翻轉）
+                    // 最安全的判定法：兩手之間的 X 軸距離大於兩耳之間的 X 軸距離的 1.5 倍
+                    const earDist = Math.abs(leftEar.x - rightEar.x);
+                    const handDist = Math.abs(leftPalm.x - rightPalm.x);
+                    
+                    if (handDist > earDist * 1.5) {
+                        hasOpenedHands = true; // 成功張開雙手，解鎖擊掌資格！
+                    }
+                }
+
+                // 擊掌相碰偵測
                 if (leftPalm.visibility > 0.5 && rightPalm.visibility > 0.5) {
                     const dx = leftPalm.x - rightPalm.x;
                     const dy = leftPalm.y - rightPalm.y;
@@ -250,10 +267,13 @@ HTML
                     score++;
                 }
 
-                // 體感擊掌跳躍
+                // 體感擊掌跳躍（必須先張開手 hasOpenedHands === true 才能觸發）
                 if (palmsCollided) {
                     if (!isPalmsTouching) {
-                        triggerFlap();
+                        if (hasOpenedHands) {
+                            triggerFlap();
+                            hasOpenedHands = false; // 觸發後立刻上鎖，逼玩家下次必須再張開手
+                        }
                         isPalmsTouching = true;
                     }
                 } else {
@@ -338,10 +358,24 @@ HTML
                 canvasCtx.strokeText(`Score: ${score}`, WIDTH - 40, 70);
                 canvasCtx.fillText(`Score: ${score}`, WIDTH - 40, 70);
 
-                // 大絕招 UI 提示
+                // 大絕招 UI 提示與狀態文字
                 if (currentState === STATES.PLAYING) {
                     canvasCtx.font = 'bold 22px Arial';
                     canvasCtx.textAlign = 'left';
+                    
+                    // 右下角多畫一個「雙手解鎖狀態」方便玩家看
+                    canvasCtx.save();
+                    canvasCtx.textAlign = 'right';
+                    canvasCtx.font = 'bold 20px Arial';
+                    if (hasOpenedHands) {
+                        canvasCtx.fillStyle = '#00ff00';
+                        canvasCtx.fillText("👐 雙手已張開！預備擊掌！", WIDTH - 40, HEIGHT - 25);
+                    } else {
+                        canvasCtx.fillStyle = '#ff3333';
+                        canvasCtx.fillText("↔️ 請先將雙手張開超過耳朵！", WIDTH - 40, HEIGHT - 25);
+                    }
+                    canvasCtx.restore();
+
                     if (currentTime < invincibleEndTime) {
                         canvasCtx.fillStyle = '#333333';
                         canvasCtx.fillText("🖤 黑暗防護罩安全啟動中！無視障礙物！", 40, HEIGHT - 25);
@@ -373,7 +407,7 @@ HTML
                 let fy = PIP.y + rawLeftPalm.y * PIP.height;
                 canvasCtx.beginPath();
                 canvasCtx.arc(fx, fy, 15, 0, 2 * Math.PI);
-                canvasCtx.strokeStyle = 'cyan';
+                canvasCtx.strokeStyle = hasOpenedHands ? 'cyan' : 'red'; // 如果還沒張開手就碰，顯示紅圈提示
                 canvasCtx.lineWidth = 3;
                 canvasCtx.stroke();
             }
@@ -386,23 +420,25 @@ HTML
                 canvasCtx.fillStyle = '#00ff00';
                 canvasCtx.font = 'bold 45px Arial';
                 canvasCtx.textAlign = 'center';
-                canvasCtx.fillText("【 全體感操控測試 】", WIDTH / 2, HEIGHT / 2 - 60);
+                canvasCtx.fillText("【 大動作體感操控測試 】", WIDTH / 2, HEIGHT / 2 - 60);
 
                 canvasCtx.fillStyle = 'white';
                 canvasCtx.font = '24px Arial';
-                canvasCtx.fillText("請退後至全身入鏡，並將雙手手掌相碰一次進行校正", WIDTH / 2, HEIGHT / 2);
+                canvasCtx.fillText("請退後至全身入鏡。先雙手張開超過耳朵，再相碰一次進行校正", WIDTH / 2, HEIGHT / 2);
 
                 if (palmsCollided) {
                     if (!isPalmsTouching) {
-                        isPalmsTouching = true;
-                        testSuccessTimer = 60; 
-                        playJumpSound(); 
+                        if (hasOpenedHands) {
+                            isPalmsTouching = true;
+                            testSuccessTimer = 60; 
+                            playJumpSound(); 
 
-                        if (results.poseLandmarks) {
-                            const l = results.poseLandmarks;
-                            if (l[23] && l[25]) {
-                                baseHipKneeDist = Math.abs(l[25].y - l[23].y);
-                                if(baseHipKneeDist < 0.05) baseHipKneeDist = 0.18; 
+                            if (results.poseLandmarks) {
+                                const l = results.poseLandmarks;
+                                if (l[23] && l[25]) {
+                                    baseHipKneeDist = Math.abs(l[25].y - l[23].y);
+                                    if(baseHipKneeDist < 0.05) baseHipKneeDist = 0.18; 
+                                }
                             }
                         }
                     }
@@ -486,7 +522,7 @@ HTML
                     pose.send({ image: videoElement }).then(() => {
                         requestAnimationFrame(onFrameLoop);
                     }).catch(err => {
-                        console.error("Pose 訊學追蹤錯誤:", err);
+                        console.error("Pose 訊號追蹤錯誤:", err);
                         requestAnimationFrame(onFrameLoop);
                     });
                 }
