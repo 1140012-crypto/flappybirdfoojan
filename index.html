@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>體感 Flappy Bird (MQTTGO 坐姿啟動+起立無敵版)</title>
+    <title>體感 Flappy Bird (MQTTGO 1秒延遲版)</title>
     <style>
         html, body {
             margin: 0;
@@ -112,9 +112,9 @@
         let testSuccessTimer = 0;
         let audioCtx = null;
 
-        // 【全新優化】坐姿啟動專用變數
-        let baseHipKneeDist = 0.02;      // 儲存坐姿時的臀膝垂直高度基準
-        let isReadyToStand = true;       // 是否處於「坐在椅子上」的蓄力完畢狀態
+        // 起立與無敵狀態變數
+        let baseHipKneeDist = 0.18;      
+        let wasStandingUp = false;       
         let invincibleEndTime = 0;       
         let cooldownEndTime = 0;         
 
@@ -164,9 +164,7 @@
                 invincibleEndTime = currentTime + 5000; 
                 cooldownEndTime = currentTime + 20000;  
                 playShieldSound();
-                return true;
             }
-            return false;
         }
 
         function triggerFlap() {
@@ -174,23 +172,22 @@
             playJumpSound(); 
         }
 
-        // 修正重置邏輯，確保每次重開都預設為坐姿蓄力
+        function resetPipe() {
+            pipe.x = WIDTH;
+            pipe.topHeight = Math.floor(Math.random() * (HEIGHT - GROUND_HEIGHT - pipe.gap - 150)) + 70;
+        }
+
         function resetGame() {
             bird.y = HEIGHT / 2;
             bird.velocity = 0;
             score = 0;
             invincibleEndTime = 0;
             cooldownEndTime = 0;
-            isReadyToStand = true; 
+            wasStandingUp = false;
             hasOpenedHands = false; 
             resetPipe();
             currentState = STATES.PLAYING;
             if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-        }
-
-        function resetPipe() {
-            pipe.x = WIDTH;
-            pipe.topHeight = Math.floor(Math.random() * (HEIGHT - GROUND_HEIGHT - pipe.gap - 150)) + 70;
         }
 
         window.addEventListener('keydown', (e) => {
@@ -256,22 +253,13 @@
                     if (distance < threshold) palmsCollided = true;
                 }
 
-                // 【重寫】專為坐姿出發設計的「突然站立」偵測邏輯
+                // 起立偵測
                 const leftHip = landmarks[23];
                 const leftKnee = landmarks[25];
                 if (leftHip.visibility > 0.5 && leftKnee.visibility > 0.5) {
                     const currentHipKneeDist = Math.abs(leftKnee.y - leftHip.y);
-                    
-                    // A. 站立判定：當前大腿垂直長度比坐姿基準增加了 0.08 以上（代表屁股抬高、站直了）
-                    if (currentHipKneeDist > baseHipKneeDist + 0.08) {
-                        if (isReadyToStand) {
-                            isStandingNow = true;
-                            isReadyToStand = false; // 觸發成功，鎖定狀態，必須坐下才能再次蓄力
-                        }
-                    } 
-                    // B. 坐下判定：大腿垂直高度降回接近原本的坐姿基準，代表玩家坐回椅子上了
-                    else if (currentHipKneeDist < baseHipKneeDist + 0.03) {
-                        isReadyToStand = true;
+                    if (currentHipKneeDist > baseHipKneeDist * 1.05) {
+                        isStandingNow = true;
                     }
                 }
             }
@@ -293,14 +281,16 @@
                         if (hasOpenedHands) {
                             triggerFlap();
                             
+                            // --- 【更新】發送到指定的 MQTTGO.io 'PD' 主題 ---
                             if (mqttClient && mqttClient.connected) {
-                                mqttClient.publish('PD', '1'); 
+                                mqttClient.publish('PD', '1'); // 立刻發送 "1"
                                 
                                 setTimeout(() => {
-                                    mqttClient.publish('PD', '2'); 
+                                    mqttClient.publish('PD', '2'); // 【已修改】等待 1 秒 (1000 毫秒) 後發送 "2"
                                     console.log("MQTTGO 發送成功: 1 -> 2 到主題 [PD] (延遲 1 秒)");
                                 }, 1000); 
                             }
+                            // ------------------------------------------
 
                             hasOpenedHands = false; 
                         }
@@ -310,10 +300,11 @@
                     isPalmsTouching = false;
                 }
 
-                // 體感起立無敵（當滿足從坐姿猛然站起時觸發）
-                if (isStandingNow) {
+                // 體感挺身起立無敵
+                if (isStandingNow && !wasStandingUp) {
                     triggerShield();
                 }
+                wasStandingUp = isStandingNow;
 
                 const isInvincible = currentTime < invincibleEndTime;
 
@@ -412,14 +403,8 @@
                         canvasCtx.fillStyle = '#ff9900';
                         canvasCtx.fillText(`⏳ 大絕招冷卻中 (CD): ${cdLeft} 秒`, 40, HEIGHT - 25);
                     } else {
-                        // 狀態面板動態提示
-                        if (isReadyToStand) {
-                            canvasCtx.fillStyle = '#00ff00';
-                            canvasCtx.fillText("🪑 蓄力完畢：[從椅子上站直身子] 即可觸發無敵！", 40, HEIGHT - 25);
-                        } else {
-                            canvasCtx.fillStyle = '#00ffff';
-                            canvasCtx.fillText("🔄 請坐回椅子上，為下一次大絕招蓄力...", 40, HEIGHT - 25);
-                        }
+                        canvasCtx.fillStyle = '#00ff00';
+                        canvasCtx.fillText("⚡ 大絕: [挺身起立] 即可發動無敵！", 40, HEIGHT - 25);
                     }
                 }
             }
@@ -454,11 +439,11 @@
                 canvasCtx.fillStyle = '#00ff00';
                 canvasCtx.font = 'bold 45px Arial';
                 canvasCtx.textAlign = 'center';
-                canvasCtx.fillText("【 坐姿開局體感校正 】", WIDTH / 2, HEIGHT / 2 - 60);
+                canvasCtx.fillText("【 大動作體感連端測試 】", WIDTH / 2, HEIGHT / 2 - 60);
 
                 canvasCtx.fillStyle = 'white';
                 canvasCtx.font = '24px Arial';
-                canvasCtx.fillText("請先「坐在椅子上」入鏡（需拍到大腿與膝蓋）。雙手張開超耳朵後，擊掌一次進行校正", WIDTH / 2, HEIGHT / 2);
+                canvasCtx.fillText("請退後至全身入鏡。先雙手張開超過耳朵，再相碰一次進行校正", WIDTH / 2, HEIGHT / 2);
 
                 if (palmsCollided) {
                     if (!isPalmsTouching) {
@@ -470,9 +455,8 @@
                             if (results.poseLandmarks) {
                                 const l = results.poseLandmarks;
                                 if (l[23] && l[25]) {
-                                    // 核心修改：此處精準抓取你「坐姿狀態」下的臀膝垂直距離作為 0 基準線
                                     baseHipKneeDist = Math.abs(l[25].y - l[23].y);
-                                    console.log("坐姿校正成功！基準垂直高度為:", baseHipKneeDist);
+                                    if(baseHipKneeDist < 0.05) baseHipKneeDist = 0.18; 
                                 }
                             }
                         }
@@ -485,7 +469,7 @@
                     testSuccessTimer--;
                     canvasCtx.fillStyle = 'cyan';
                     canvasCtx.font = 'bold 28px Arial';
-                    canvasCtx.fillText("坐姿校正完畢！MQTTGO 服務已同步就緒...", WIDTH / 2, HEIGHT / 2 + 80);
+                    canvasCtx.fillText("測試成功並已校正！MQTTGO 服務已同步就緒...", WIDTH / 2, HEIGHT / 2 + 80);
 
                     if (testSuccessTimer === 0) {
                         resetGame();
