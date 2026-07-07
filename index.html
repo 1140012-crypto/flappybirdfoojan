@@ -4,7 +4,7 @@ HTML
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>純體感 Flappy Bird (大動作擊掌版)</title>
+    <title>體感 Flappy Bird (MQTTGO 物聯網版)</title>
     <style>
         html, body {
             margin: 0;
@@ -59,6 +59,7 @@ HTML
     </style>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mqtt@4.3.7/dist/mqtt.min.js"></script>
 </head>
 <body>
 
@@ -88,6 +89,18 @@ HTML
         };
         let currentState = STATES.LOADING;
 
+        // --- 【更新】MQTT 初始化設定 ---
+        // 連接至你指定的 MQTTGO.io 伺服器（使用安全加密的網頁型 WSS 通道）
+        const mqttClient = mqtt.connect('wss://mqttgo.io:8084/mqtt');
+
+        mqttClient.on('connect', () => {
+            console.log('MQTTGO.io 伺服器連線成功！');
+        });
+
+        mqttClient.on('error', (err) => {
+            console.error('MQTTGO 連線失敗:', err);
+        });
+
         // --- 遊戲變數 ---
         const WIDTH = canvasElement.width;
         const HEIGHT = canvasElement.height;
@@ -107,7 +120,7 @@ HTML
         let invincibleEndTime = 0;       
         let cooldownEndTime = 0;         
 
-        // 新增：張開雙手超過耳朵的狀態鎖
+        // 張開雙手超過耳朵的狀態鎖
         let hasOpenedHands = false;
 
         const PIP = { x: 30, y: 30, width: 280, height: 157 }; 
@@ -173,7 +186,7 @@ HTML
             invincibleEndTime = 0;
             cooldownEndTime = 0;
             wasStandingUp = false;
-            hasOpenedHands = false; // 重置雙手鎖
+            hasOpenedHands = false; 
             resetPipe();
             currentState = STATES.PLAYING;
             if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
@@ -219,19 +232,16 @@ HTML
                 
                 const leftPalm = landmarks[19];  
                 const rightPalm = landmarks[20]; 
-                const leftEar = landmarks[7];   // 左耳
-                const rightEar = landmarks[8];  // 右耳
+                const leftEar = landmarks[7];   
+                const rightEar = landmarks[8];  
 
-                // 核心邏輯：偵測雙手是否已經張開超過耳朵
-                // 注意：影像在水平方向通常是鏡像的，這裡我們用相對位置判定
+                // 偵測雙手是否已經張開超過耳朵
                 if (leftPalm.visibility > 0.5 && rightPalm.visibility > 0.5 && leftEar.visibility > 0.5 && rightEar.visibility > 0.5) {
-                    // 影像中，通常左手在畫面右邊，右手在畫面左邊（若有鏡像翻轉）
-                    // 最安全的判定法：兩手之間的 X 軸距離大於兩耳之間的 X 軸距離的 1.5 倍
                     const earDist = Math.abs(leftEar.x - rightEar.x);
                     const handDist = Math.abs(leftPalm.x - rightPalm.x);
                     
                     if (handDist > earDist * 1.5) {
-                        hasOpenedHands = true; // 成功張開雙手，解鎖擊掌資格！
+                        hasOpenedHands = true; 
                     }
                 }
 
@@ -267,12 +277,24 @@ HTML
                     score++;
                 }
 
-                // 體感擊掌跳躍（必須先張開手 hasOpenedHands === true 才能觸發）
+                // 體感擊掌跳躍
                 if (palmsCollided) {
                     if (!isPalmsTouching) {
                         if (hasOpenedHands) {
                             triggerFlap();
-                            hasOpenedHands = false; // 觸發後立刻上鎖，逼玩家下次必須再張開手
+                            
+                            // --- 【更新】發送到指定的 MQTTGO.io 'PD' 主題 ---
+                            if (mqttClient && mqttClient.connected) {
+                                mqttClient.publish('PD', '1'); // 立刻發送 "1"
+                                
+                                setTimeout(() => {
+                                    mqttClient.publish('PD', '2'); // 等待 0.2 秒 (200 毫秒) 後發送 "2"
+                                    console.log("MQTTGO 發送成功: 1 -> 2 到主題 [PD]");
+                                }, 200); 
+                            }
+                            // ------------------------------------------
+
+                            hasOpenedHands = false; 
                         }
                         isPalmsTouching = true;
                     }
@@ -358,12 +380,11 @@ HTML
                 canvasCtx.strokeText(`Score: ${score}`, WIDTH - 40, 70);
                 canvasCtx.fillText(`Score: ${score}`, WIDTH - 40, 70);
 
-                // 大絕招 UI 提示與狀態文字
+                // 大絕招 UI 提示
                 if (currentState === STATES.PLAYING) {
                     canvasCtx.font = 'bold 22px Arial';
                     canvasCtx.textAlign = 'left';
                     
-                    // 右下角多畫一個「雙手解鎖狀態」方便玩家看
                     canvasCtx.save();
                     canvasCtx.textAlign = 'right';
                     canvasCtx.font = 'bold 20px Arial';
@@ -407,7 +428,7 @@ HTML
                 let fy = PIP.y + rawLeftPalm.y * PIP.height;
                 canvasCtx.beginPath();
                 canvasCtx.arc(fx, fy, 15, 0, 2 * Math.PI);
-                canvasCtx.strokeStyle = hasOpenedHands ? 'cyan' : 'red'; // 如果還沒張開手就碰，顯示紅圈提示
+                canvasCtx.strokeStyle = hasOpenedHands ? 'cyan' : 'red'; 
                 canvasCtx.lineWidth = 3;
                 canvasCtx.stroke();
             }
@@ -420,7 +441,7 @@ HTML
                 canvasCtx.fillStyle = '#00ff00';
                 canvasCtx.font = 'bold 45px Arial';
                 canvasCtx.textAlign = 'center';
-                canvasCtx.fillText("【 大動作體感操控測試 】", WIDTH / 2, HEIGHT / 2 - 60);
+                canvasCtx.fillText("【 大動作體感連端測試 】", WIDTH / 2, HEIGHT / 2 - 60);
 
                 canvasCtx.fillStyle = 'white';
                 canvasCtx.font = '24px Arial';
@@ -450,7 +471,7 @@ HTML
                     testSuccessTimer--;
                     canvasCtx.fillStyle = 'cyan';
                     canvasCtx.font = 'bold 28px Arial';
-                    canvasCtx.fillText("測試成功並已校正身高！遊戲即將開始...", WIDTH / 2, HEIGHT / 2 + 80);
+                    canvasCtx.fillText("測試成功並已校正！MQTTGO 服務已同步就緒...", WIDTH / 2, HEIGHT / 2 + 80);
 
                     if (testSuccessTimer === 0) {
                         resetGame();
