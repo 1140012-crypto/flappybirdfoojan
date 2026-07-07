@@ -4,7 +4,7 @@ HTML
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>體感 Flappy Bird (MQTTGO 物聯網版)</title>
+    <title>體感 Flappy Bird (MQTTGO 1秒延遲版)</title>
     <style>
         html, body {
             margin: 0;
@@ -89,8 +89,7 @@ HTML
         };
         let currentState = STATES.LOADING;
 
-        // --- 【更新】MQTT 初始化設定 ---
-        // 連接至你指定的 MQTTGO.io 伺服器（使用安全加密的網頁型 WSS 通道）
+        // --- MQTT 初始化設定 ---
         const mqttClient = mqtt.connect('wss://mqttgo.io:8084/mqtt');
 
         mqttClient.on('connect', () => {
@@ -288,9 +287,9 @@ HTML
                                 mqttClient.publish('PD', '1'); // 立刻發送 "1"
                                 
                                 setTimeout(() => {
-                                    mqttClient.publish('PD', '2'); // 等待 0.2 秒 (200 毫秒) 後發送 "2"
-                                    console.log("MQTTGO 發送成功: 1 -> 2 到主題 [PD]");
-                                }, 200); 
+                                    mqttClient.publish('PD', '2'); // 【已修改】等待 1 秒 (1000 毫秒) 後發送 "2"
+                                    console.log("MQTTGO 發送成功: 1 -> 2 到主題 [PD] (延遲 1 秒)");
+                                }, 1000); 
                             }
                             // ------------------------------------------
 
