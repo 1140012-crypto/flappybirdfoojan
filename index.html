@@ -1,0 +1,516 @@
+HTML
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>純體感 Flappy Bird (酷黑防護罩版)</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #111;
+            font-family: sans-serif;
+        }
+        canvas {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 28px;
+            font-weight: bold;
+            color: #00ff00;
+            text-align: center;
+            z-index: 10;
+        }
+        #cameraSelectContainer {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            z-index: 20;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid #444;
+            display: none;
+        }
+        #cameraSelectContainer label {
+            color: #fff;
+            font-size: 14px;
+            margin-right: 8px;
+        }
+        #cameraSelect {
+            padding: 4px 8px;
+            font-size: 14px;
+            background: #222;
+            color: #fff;
+            border: 1px solid #666;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loading">載入 AI 模型與要求攝影機權限中...</div>
+    
+    <div id="cameraSelectContainer">
+        <label for="cameraSelect">📷 選擇鏡頭:</label>
+        <select id="cameraSelect"></select>
+    </div>
+
+    <video id="video" width="640" height="480" style="display: none;" autoplay playsinline></video>
+    <canvas id="gameCanvas" width="1280" height="720"></canvas>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const canvasElement = document.getElementById('gameCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const loadingText = document.getElementById('loading');
+        const cameraSelectContainer = document.getElementById('cameraSelectContainer');
+        const cameraSelect = document.getElementById('cameraSelect');
+
+        const STATES = {
+            LOADING: 'LOADING',
+            TESTING: 'TESTING',
+            PLAYING: 'PLAYING',
+            GAMEOVER: 'GAMEOVER'
+        };
+        let currentState = STATES.LOADING;
+
+        // --- 遊戲變數 ---
+        const WIDTH = canvasElement.width;
+        const HEIGHT = canvasElement.height;
+        const GROUND_HEIGHT = 50; 
+        
+        let bird = { x: WIDTH / 2, y: HEIGHT / 2, radius: 22, velocity: 0, gravity: 0.5, flapPower: -10 };
+        let pipe = { x: WIDTH, width: 90, gap: 280, speed: 6, topHeight: 0 }; 
+        
+        let score = 0;
+        let isPalmsTouching = false; 
+        let testSuccessTimer = 0;
+        let audioCtx = null;
+
+        // 起立與無敵狀態變數
+        let baseHipKneeDist = 0.18;      
+        let wasStandingUp = false;       
+        let invincibleEndTime = 0;       
+        let cooldownEndTime = 0;         
+
+        const PIP = { x: 30, y: 30, width: 280, height: 157 }; 
+        let currentStream = null; 
+
+        // 復古跳躍音效
+        function playJumpSound() {
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.type = 'triangle'; 
+                osc.frequency.setValueAtTime(250, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(550, audioCtx.currentTime + 0.12);
+                gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.12);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.12);
+            } catch (e) {}
+        }
+
+        // 防護罩音效
+        function playShieldSound() {
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.type = 'sine'; 
+                osc.frequency.setValueAtTime(350, audioCtx.currentTime);
+                osc.frequency.linearRampToValueAtTime(850, audioCtx.currentTime + 0.3);
+                gain.gain.setValueAtTime(0.25, applicationCtx.currentTime);
+                gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+                gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+            } catch (e) {}
+        }
+
+        // 大絕招啟動邏輯（20秒冷卻）
+        function triggerShield() {
+            const currentTime = performance.now();
+            if (currentTime > cooldownEndTime) {
+                invincibleEndTime = currentTime + 5000; 
+                cooldownEndTime = currentTime + 20000;  
+                playShieldSound();
+            }
+        }
+
+        function triggerFlap() {
+            bird.velocity = bird.flapPower;
+            playJumpSound(); 
+        }
+
+        function resetPipe() {
+            pipe.x = WIDTH;
+            pipe.topHeight = Math.floor(Math.random() * (HEIGHT - GROUND_HEIGHT - pipe.gap - 150)) + 70;
+        }
+
+        function resetGame() {
+            bird.y = HEIGHT / 2;
+            bird.velocity = 0;
+            score = 0;
+            invincibleEndTime = 0;
+            cooldownEndTime = 0;
+            wasStandingUp = false;
+            resetPipe();
+            currentState = STATES.PLAYING;
+            if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        // 僅保留 R 鍵用於重開遊戲，移除跳躍與大絕招的鍵盤控制
+        window.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'r' && currentState === STATES.GAMEOVER) {
+                resetGame();
+            }
+        });
+
+        const pose = new Pose({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+        });
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults((results) => {
+            if (currentState === STATES.LOADING) {
+                loadingText.style.display = 'none';
+                cameraSelectContainer.style.display = 'block'; 
+                currentState = STATES.TESTING;
+            }
+
+            const currentTime = performance.now();
+
+            // 1. 背景
+            canvasCtx.fillStyle = '#70c5ce';
+            canvasCtx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            // 2. 骨架偵測
+            let palmsCollided = false;
+            let rawLeftPalm = null;
+            let isStandingNow = false;
+
+            if (results.poseLandmarks) {
+                const landmarks = results.poseLandmarks;
+                
+                // 擊掌偵測
+                const leftPalm = landmarks[19];  
+                const rightPalm = landmarks[20]; 
+                if (leftPalm.visibility > 0.5 && rightPalm.visibility > 0.5) {
+                    const dx = leftPalm.x - rightPalm.x;
+                    const dy = leftPalm.y - rightPalm.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    const threshold = 0.09; 
+                    rawLeftPalm = leftPalm;
+                    if (distance < threshold) palmsCollided = true;
+                }
+
+                // 起立偵測
+                const leftHip = landmarks[23];
+                const leftKnee = landmarks[25];
+                if (leftHip.visibility > 0.5 && leftKnee.visibility > 0.5) {
+                    const currentHipKneeDist = Math.abs(leftKnee.y - leftHip.y);
+                    if (currentHipKneeDist > baseHipKneeDist * 1.05) {
+                        isStandingNow = true;
+                    }
+                }
+            }
+
+            // 3. 遊戲物理邏輯
+            if (currentState === STATES.PLAYING) {
+                bird.velocity += bird.gravity;
+                bird.y += bird.velocity;
+
+                pipe.x -= pipe.speed;
+                if (pipe.x < -pipe.width) {
+                    resetPipe();
+                    score++;
+                }
+
+                // 體感擊掌跳躍
+                if (palmsCollided) {
+                    if (!isPalmsTouching) {
+                        triggerFlap();
+                        isPalmsTouching = true;
+                    }
+                } else {
+                    isPalmsTouching = false;
+                }
+
+                // 體感挺身起立無敵
+                if (isStandingNow && !wasStandingUp) {
+                    triggerShield();
+                }
+                wasStandingUp = isStandingNow;
+
+                const isInvincible = currentTime < invincibleEndTime;
+
+                if (isInvincible) {
+                    if (bird.y - bird.radius < 0) bird.y = bird.radius;
+                    if (bird.y + bird.radius > HEIGHT - GROUND_HEIGHT) bird.y = HEIGHT - GROUND_HEIGHT - bird.radius;
+                } else {
+                    if (bird.y - bird.radius < 0 || bird.y + bird.radius > HEIGHT - GROUND_HEIGHT) {
+                        currentState = STATES.GAMEOVER;
+                    }
+                    if (bird.x + bird.radius > pipe.x && bird.x - bird.radius < pipe.x + pipe.width) {
+                        if (bird.y - bird.radius < pipe.topHeight || bird.y + bird.radius > pipe.topHeight + pipe.gap) {
+                            currentState = STATES.GAMEOVER;
+                        }
+                    }
+                }
+            }
+
+            // 4. 繪製元件
+            if (currentState === STATES.PLAYING || currentState === STATES.GAMEOVER) {
+                // 水管
+                canvasCtx.fillStyle = '#73bf2e';
+                canvasCtx.fillRect(pipe.x, 0, pipe.width, pipe.topHeight);
+                canvasCtx.fillRect(pipe.x, pipe.topHeight + pipe.gap, pipe.width, HEIGHT - GROUND_HEIGHT - (pipe.topHeight + pipe.gap));
+                
+                canvasCtx.strokeStyle = '#53821a';
+                canvasCtx.lineWidth = 4;
+                canvasCtx.strokeRect(pipe.x, 0, pipe.width, pipe.topHeight);
+                canvasCtx.strokeRect(pipe.x, pipe.topHeight + pipe.gap, pipe.width, HEIGHT - GROUND_HEIGHT - (pipe.topHeight + pipe.gap));
+
+                // 地板
+                canvasCtx.fillStyle = '#ded895';
+                canvasCtx.fillRect(0, HEIGHT - GROUND_HEIGHT, WIDTH, GROUND_HEIGHT);
+                canvasCtx.fillStyle = '#4fa32d';
+                canvasCtx.fillRect(0, HEIGHT - GROUND_HEIGHT, WIDTH, 12);
+
+                // 小鳥
+                canvasCtx.beginPath();
+                canvasCtx.arc(bird.x, bird.y, bird.radius, 0, 2 * Math.PI);
+                canvasCtx.fillStyle = '#f61010';
+                canvasCtx.fill();
+                canvasCtx.strokeStyle = '#000';
+                canvasCtx.lineWidth = 3;
+                canvasCtx.stroke();
+
+                // 黑色防護罩特效
+                if (currentState === STATES.PLAYING && currentTime < invincibleEndTime) {
+                    canvasCtx.save();
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(bird.x, bird.y, bird.radius + 12, 0, 2 * Math.PI);
+                    canvasCtx.strokeStyle = 'rgba(0, 0, 0, 0.9)'; 
+                    canvasCtx.lineWidth = 5;
+                    canvasCtx.shadowBlur = 15;
+                    canvasCtx.shadowColor = '#333333'; 
+                    canvasCtx.stroke();
+                    canvasCtx.restore();
+
+                    let shieldLeft = ((invincibleEndTime - currentTime) / 1000).toFixed(1);
+                    canvasCtx.fillStyle = '#000000'; 
+                    canvasCtx.font = 'bold 18px Arial';
+                    canvasCtx.textAlign = 'center';
+                    canvasCtx.fillText(`無敵: ${shieldLeft}s`, bird.x, bird.y - bird.radius - 22);
+                }
+
+                // 分數
+                canvasCtx.fillStyle = 'white';
+                canvasCtx.strokeStyle = 'black';
+                canvasCtx.lineWidth = 6;
+                canvasCtx.font = 'bold 45px Arial';
+                canvasCtx.textAlign = 'right';
+                canvasCtx.strokeText(`Score: ${score}`, WIDTH - 40, 70);
+                canvasCtx.fillText(`Score: ${score}`, WIDTH - 40, 70);
+
+                // 大絕招 UI 提示
+                if (currentState === STATES.PLAYING) {
+                    canvasCtx.font = 'bold 22px Arial';
+                    canvasCtx.textAlign = 'left';
+                    if (currentTime < invincibleEndTime) {
+                        canvasCtx.fillStyle = '#333333';
+                        canvasCtx.fillText("🖤 黑暗防護罩安全啟動中！無視障礙物！", 40, HEIGHT - 25);
+                    } else if (currentTime < cooldownEndTime) {
+                        let cdLeft = ((cooldownEndTime - currentTime) / 1000).toFixed(1);
+                        canvasCtx.fillStyle = '#ff9900';
+                        canvasCtx.fillText(`⏳ 大絕招冷卻中 (CD): ${cdLeft} 秒`, 40, HEIGHT - 25);
+                    } else {
+                        canvasCtx.fillStyle = '#00ff00';
+                        canvasCtx.fillText("⚡ 大絕: [挺身起立] 即可發動無敵！", 40, HEIGHT - 25);
+                    }
+                }
+            }
+
+            // 5. 子母畫面視訊鏡頭
+            canvasCtx.save();
+            canvasCtx.globalAlpha = 0.5; 
+            canvasCtx.translate(PIP.x + PIP.width, PIP.y);
+            canvasCtx.scale(-1, 1);
+            canvasCtx.drawImage(results.image, 0, 0, PIP.width, PIP.height);
+            canvasCtx.restore(); 
+
+            canvasCtx.strokeStyle = '#ff0000';
+            canvasCtx.lineWidth = 4;
+            canvasCtx.strokeRect(PIP.x - 2, PIP.y - 2, PIP.width + 4, PIP.height + 4);
+
+            if (palmsCollided && rawLeftPalm) {
+                let fx = PIP.x + (1 - rawLeftPalm.x) * PIP.width;
+                let fy = PIP.y + rawLeftPalm.y * PIP.height;
+                canvasCtx.beginPath();
+                canvasCtx.arc(fx, fy, 15, 0, 2 * Math.PI);
+                canvasCtx.strokeStyle = 'cyan';
+                canvasCtx.lineWidth = 3;
+                canvasCtx.stroke();
+            }
+
+            // 6. 狀態機畫面處理
+            if (currentState === STATES.TESTING) {
+                canvasCtx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+                canvasCtx.fillRect(0, 0, WIDTH, HEIGHT);
+
+                canvasCtx.fillStyle = '#00ff00';
+                canvasCtx.font = 'bold 45px Arial';
+                canvasCtx.textAlign = 'center';
+                canvasCtx.fillText("【 全體感操控測試 】", WIDTH / 2, HEIGHT / 2 - 60);
+
+                canvasCtx.fillStyle = 'white';
+                canvasCtx.font = '24px Arial';
+                canvasCtx.fillText("請退後至全身入鏡，並將雙手手掌相碰一次進行校正", WIDTH / 2, HEIGHT / 2);
+
+                if (palmsCollided) {
+                    if (!isPalmsTouching) {
+                        isPalmsTouching = true;
+                        testSuccessTimer = 60; 
+                        playJumpSound(); 
+
+                        if (results.poseLandmarks) {
+                            const l = results.poseLandmarks;
+                            if (l[23] && l[25]) {
+                                baseHipKneeDist = Math.abs(l[25].y - l[23].y);
+                                if(baseHipKneeDist < 0.05) baseHipKneeDist = 0.18; 
+                            }
+                        }
+                    }
+                } else {
+                    isPalmsTouching = false;
+                }
+
+                if (testSuccessTimer > 0) {
+                    testSuccessTimer--;
+                    canvasCtx.fillStyle = 'cyan';
+                    canvasCtx.font = 'bold 28px Arial';
+                    canvasCtx.fillText("測試成功並已校正身高！遊戲即將開始...", WIDTH / 2, HEIGHT / 2 + 80);
+
+                    if (testSuccessTimer === 0) {
+                        resetGame();
+                    }
+                }
+            } else if (currentState === STATES.GAMEOVER) {
+                canvasCtx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                canvasCtx.fillRect(0, 0, WIDTH, HEIGHT);
+                
+                canvasCtx.fillStyle = '#f61010';
+                canvasCtx.font = 'bold 70px Arial';
+                canvasCtx.textAlign = 'center';
+                canvasCtx.fillText("GAME OVER", WIDTH / 2, HEIGHT / 2);
+                
+                canvasCtx.fillStyle = 'white';
+                canvasCtx.font = '28px Arial';
+                canvasCtx.fillText("Press 'R' to Restart", WIDTH / 2, HEIGHT / 2 + 60);
+            }
+        });
+
+        // 原生 getUserMedia 多鏡頭驅動核心
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                stream.getTracks().forEach(track => track.stop());
+
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+
+                cameraSelect.innerHTML = '';
+                videoDevices.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `攝影機 ${index + 1}`;
+                    cameraSelect.appendChild(option);
+                });
+
+                if (videoDevices.length > 0) {
+                    startNativeCamera(videoDevices[0].deviceId);
+                } else {
+                    alert("找不到任何可用的攝影機！");
+                }
+            } catch (error) {
+                console.error("無法初始化攝影機權限:", error);
+                loadingText.innerText = "無法取得攝影機權限，請檢查瀏覽器隱私設定。";
+            }
+        }
+
+        async function startNativeCamera(deviceId) {
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+                currentStream = null;
+            }
+
+            const constraints = {
+                video: {
+                    deviceId: deviceId ? { exact: deviceId } : undefined,
+                    width: { ideal: 640 },
+                    height: { ideal: 480 }
+                }
+            };
+
+            try {
+                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+                videoElement.srcObject = currentStream;
+
+                function onFrameLoop() {
+                    if (!currentStream || videoElement.paused || videoElement.ended) return;
+                    pose.send({ image: videoElement }).then(() => {
+                        requestAnimationFrame(onFrameLoop);
+                    }).catch(err => {
+                        console.error("Pose 訊學追蹤錯誤:", err);
+                        requestAnimationFrame(onFrameLoop);
+                    });
+                }
+
+                videoElement.onloadedmetadata = () => {
+                    videoElement.play();
+                    requestAnimationFrame(onFrameLoop);
+                };
+
+            } catch (err) {
+                console.error("原生鏡頭硬體調度失敗:", err);
+                alert("切換鏡頭失敗！該攝影機可能正被其他應用程式佔用中。");
+            }
+        }
+
+        cameraSelect.addEventListener('change', (e) => {
+            const selectedDeviceId = e.target.value;
+            if (currentState !== STATES.LOADING) {
+                currentState = STATES.TESTING; 
+            }
+            startNativeCamera(selectedDeviceId);
+        });
+
+        initCamera();
+    </script>
+</body>
+</html>
